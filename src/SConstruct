@@ -460,6 +460,23 @@ Depends(objs[-1], 'wmfluxes-nobranch-U-inc.f90')
 Depends(objs[-1], 'wmfluxes-nobranch-V-inc.f90')
 Depends(objs[-1], 'wmfluxes-nobranch-W-inc.f90')
 Depends(objs[-1], 'wmfluxes-nobranch-inc-4ord.f90')
+
+# ==============================================================================
+# --- ADDED CUDA RULES HERE ---
+# ==============================================================================
+env['NVCC'] = 'nvcc'
+env['NVCCFLAGS'] = '-O3 -arch=sm_70' # Modify this matching your GPU! (e.g., sm_80 for A100)
+env.Append(BUILDERS={'NVCC': Builder(action='$NVCC $NVCCFLAGS -c $SOURCE -o $TARGET', suffix='.o', src_suffix='.cu')})
+
+env.Append(LIBS=['cudart'])
+env.Append(LIBPATH=['/usr/local/cuda/lib64']) # This path must exist in your docker image
+
+# Compile the .cu file we created
+objs += env.NVCC(target = target_dir + 'cdu_cuda', source = 'cdu_cuda.cu')
+objs += env.Object(target = target_dir + 'snapshot_wrapper', source = 'snapshot_wrapper.cpp', CXXFLAGS = env['CXXFLAGS'] + ' -std=c++17')
+# ==============================================================================
+
+
 objs += env.Object(target = target_dir + 'tsteps',             source = 'tsteps.f90')
 objs += env.Object(target = target_dir + 'main',               source = 'main.f90')
 
@@ -467,4 +484,15 @@ objs = list(filter(lambda o: str(o)[-4:] != '.mod', objs))
 
 t = env.Program(target = target_dir + 'ELMM', source= objs + SBfile + PBfile)
 
-Default(t)
+# --- Build the Snapshot CLI Tool ---
+# We compile dump_cli.cpp into an object, enforcing C++11 (or higher)
+cli_obj = env.Object(target = target_dir + 'dump_cli_obj', 
+                     source = 'dump_cli.cpp', 
+                     CXXFLAGS = env['CXXFLAGS'] + ' -std=c++11')
+
+# We link the object into a separate standalone executable program
+cli_prog = env.Program(target = target_dir + 'dump_cli', source = cli_obj)
+
+# --- Set Default Targets ---
+# This tells SCons to build BOTH executables when you run ./make_release
+Default(t, cli_prog)

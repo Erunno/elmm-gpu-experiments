@@ -10,24 +10,92 @@ contains
 
 
 
+  ! subroutine CDUdiv(U2, U, V, W)
+  !   real(knd), contiguous, intent(out) :: U2(-2:,-2:,-2:)
+  !   real(knd), contiguous, intent(in)  :: U(-2:,-2:,-2:), V(-2:,-2:,-2:), W(-2:,-2:,-2:)
+  !   real(knd) :: Ax, Ay, Az
+  !   integer :: i, j, k, bi, bj, bk
+  !   integer :: tnx, tny, tnz
+    
+  !   integer, parameter :: narr = 4
+    
+  !   tnx = tilenx(narr)
+  !   tny = tileny(narr)
+  !   tnz = tilenz(narr)
 
+  !   Ax = 0.25_knd / dxmin
+  !   Ay = 0.25_knd / dymin
+  !   Az = 0.25_knd / dzmin
 
-  subroutine CDUdiv(U2, U, V, W)
+  !   !$omp parallel do private(i, j, k, bi, bj, bk) schedule(runtime) collapse(3)
+  !   do bk = 1, Unz, tnz
+  !     do bj = 1, Uny, tny
+  !       do bi = 1, Unx, tnx
+  !         do k = bk, min(bk+tnz-1, Unz)
+  !           do j = bj, min(bj+tny-1, Uny)
+  !             do i = bi, min(bi+tnx-1, Unx)
+  !               U2(i,j,k) = - ((Ax*(U(i+1,j,k) + U(i,j,k)) * (U(i+1,j,k) + U(i,j,k)) &
+  !                             - Ax*(U(i,j,k) + U(i-1,j,k)) * (U(i,j,k) + U(i-1,j,k))) &
+  !                            + (Ay*(U(i,j+1,k) + U(i,j,k)) * (V(i+1,j,k) + V(i,j,k)) &
+  !                             - Ay*(U(i,j,k) + U(i,j-1,k)) * (V(i+1,j-1,k) + V(i,j-1,k))) &
+  !                            + (Az*(U(i,j,k+1) + U(i,j,k)) * (W(i+1,j,k) + W(i,j,k)) &
+  !                             - Az*(U(i,j,k) + U(i,j,k-1)) * (W(i+1,j,k-1) + W(i,j,k-1))))
+  !             end do
+  !           end do
+  !         end do
+  !       end do
+  !     end do
+  !   end do
+  !   !$omp end parallel do
+  ! end subroutine CDUdiv
+
+subroutine CDUdiv(U2, U, V, W)
+    use iso_c_binding, only: c_int
     real(knd), contiguous, intent(out) :: U2(-2:,-2:,-2:)
     real(knd), contiguous, intent(in)  :: U(-2:,-2:,-2:), V(-2:,-2:,-2:), W(-2:,-2:,-2:)
     real(knd) :: Ax, Ay, Az
+    
+    ! Variables for CPU execution and comparison
     integer :: i, j, k, bi, bj, bk
     integer :: tnx, tny, tnz
-    
     integer, parameter :: narr = 4
+    real(knd), allocatable :: U2_cpu(:,:,:)
+    real(knd) :: max_error
     
-    tnx = tilenx(narr)
-    tny = tileny(narr)
-    tnz = tilenz(narr)
+    ! --- Interface to the CUDA C++ wrapper ---
+    interface
+      subroutine launch_cdudiv_cuda(U2, U, V, W, Ax, Ay, Az, Unx, Uny, Unz, ldx, ldy, total_size) bind(C, name="launch_cdudiv_cuda")
+        import :: c_int, knd
+        real(knd), dimension(*), intent(inout) :: U2
+        real(knd), dimension(*), intent(in)    :: U, V, W
+        real(knd), value, intent(in)           :: Ax, Ay, Az
+        integer(c_int), value, intent(in)    :: Unx, Uny, Unz, ldx, ldy, total_size
+      end subroutine launch_cdudiv_cuda
+    end interface
+
+    ! Calculate grid dimensions for C++ indexing
+    integer(c_int) :: ldx, ldy, total_size
+
+    ! If bounds are U(-2:Nx+2), the size of the X dimension is Nx + 5
+    ldx = size(U, 1) 
+    ldy = size(U, 2)
+    total_size = size(U)
 
     Ax = 0.25_knd / dxmin
     Ay = 0.25_knd / dymin
     Az = 0.25_knd / dzmin
+
+    ! =========================================================================
+    ! 1. CPU EXECUTION (Original Code)
+    ! =========================================================================
+    
+    ! Allocate a temporary array for the CPU result with the exact same bounds
+    allocate(U2_cpu(lbound(U2,1):ubound(U2,1), lbound(U2,2):ubound(U2,2), lbound(U2,3):ubound(U2,3)))
+    call set(U2_cpu, 0._knd)
+    
+    tnx = tilenx(narr)
+    tny = tileny(narr)
+    tnz = tilenz(narr)
 
     !$omp parallel do private(i, j, k, bi, bj, bk) schedule(runtime) collapse(3)
     do bk = 1, Unz, tnz
@@ -36,7 +104,7 @@ contains
           do k = bk, min(bk+tnz-1, Unz)
             do j = bj, min(bj+tny-1, Uny)
               do i = bi, min(bi+tnx-1, Unx)
-                U2(i,j,k) = - ((Ax*(U(i+1,j,k) + U(i,j,k)) * (U(i+1,j,k) + U(i,j,k)) &
+                U2_cpu(i,j,k) = - ((Ax*(U(i+1,j,k) + U(i,j,k)) * (U(i+1,j,k) + U(i,j,k)) &
                               - Ax*(U(i,j,k) + U(i-1,j,k)) * (U(i,j,k) + U(i-1,j,k))) &
                              + (Ay*(U(i,j+1,k) + U(i,j,k)) * (V(i+1,j,k) + V(i,j,k)) &
                               - Ay*(U(i,j,k) + U(i,j-1,k)) * (V(i+1,j-1,k) + V(i,j-1,k))) &
@@ -49,6 +117,36 @@ contains
       end do
     end do
     !$omp end parallel do
+
+    ! =========================================================================
+    ! 2. GPU EXECUTION
+    ! =========================================================================
+    ! Make sure U2 is zeroed out before the GPU writes to it
+    call set(U2, 0._knd)
+
+    ! Call the GPU! Simply pass the arrays by name.
+    call launch_cdudiv_cuda(U2, U, V, W, &
+                            Ax, Ay, Az,  &
+                            int(Unx, c_int), int(Uny, c_int), int(Unz, c_int), &
+                            ldx, ldy, total_size)
+
+    ! =========================================================================
+    ! 3. VERIFICATION
+    ! =========================================================================
+    
+    ! Calculate the maximum absolute difference between CPU and GPU
+    max_error = maxval(abs(U2 - U2_cpu))
+    print *, "--- Verification: Max difference between CPU and GPU:", max_error
+
+    if (max_error > 1e-4) then
+       print *, "!!! WARNING: GPU math DOES NOT MATCH CPU! Check indexing! !!!"
+    else
+       print *, ">>> SUCCESS: GPU and CPU match perfectly! <<<"
+    end if
+    
+    ! Clean up
+    deallocate(U2_cpu)
+
   end subroutine CDUdiv
 
 
@@ -302,44 +400,17 @@ contains
 
 
 
-subroutine CDV(V2, U, V, W)
-    ! Added c_size_t and c_sizeof
-    use iso_c_binding, only: c_char, c_size_t, c_null_char, c_sizeof
-    use Parameters, only: knd
+  subroutine CDV(V2, U, V, W)
     real(knd), contiguous, intent(out) :: V2(-2:,-2:,-2:)
     real(knd), contiguous, intent(in)  :: U(-2:,-2:,-2:), V(-2:,-2:,-2:), W(-2:,-2:,-2:)
 
-    ! --- Interface for C++ Snapshot ---
-    interface
-      subroutine dump_cdv_snapshot(suffix, U, V, W, V2, total_size, knd_bytes) bind(C, name="dump_cdv_snapshot")
-        import :: c_char, c_size_t, knd
-        character(kind=c_char), dimension(*), intent(in) :: suffix
-        real(knd), dimension(*), intent(in) :: U, V, W, V2
-        integer(c_size_t), value, intent(in) :: total_size
-        integer(c_size_t), value, intent(in) :: knd_bytes
-      end subroutine dump_cdv_snapshot
-    end interface
-
-    ! Using 64-bit sizes
-    integer(c_size_t) :: total_size
-    integer(c_size_t) :: knd_bytes
     
-    total_size = int(size(U), c_size_t)
-    ! Safely extract the exact byte size of a single array element
-    knd_bytes = c_sizeof(U(1,1,1))
+    
 
-    ! === SNAPSHOT 1 ===
-    call dump_cdv_snapshot(c_char_"input.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
-
-    ! === Original Physics ===
     call set(V2, 0)
     call CDVdiv(V2, U, V, W)
     call CDVadv(V2, U, V, W)
     call multiply(V2, 0.5_knd)
-
-    ! === SNAPSHOT 2 ===
-    call dump_cdv_snapshot(c_char_"output.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
-
   end subroutine CDV
 
 
