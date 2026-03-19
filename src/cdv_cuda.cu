@@ -1,5 +1,6 @@
 #include <iostream>
 #include <cuda_runtime.h>
+#include <cstdio> // For printf
 
 #define IDX(i, j, k, ldx, ldy) (((i) + 2) + ((j) + 2)*(ldx) + ((k) + 2)*(ldx)*(ldy))
 
@@ -64,7 +65,7 @@ __global__ void cdv_fused_kernel(
 }
 
 // ---------------------------------------------------------
-// 2. The C++ Wrapper
+// 2. The C++ Wrapper with CUDA Events
 // ---------------------------------------------------------
 template <typename RealType>
 void launch_fused_tmpl(RealType* V2, RealType* U, RealType* V, RealType* W, 
@@ -75,34 +76,79 @@ void launch_fused_tmpl(RealType* V2, RealType* U, RealType* V, RealType* W,
     size_t bytes = total_size * sizeof(RealType);
     RealType *d_V2, *d_U, *d_V, *d_W;
 
+    // --- Create CUDA Events for Timing ---
+    cudaEvent_t start_alloc, stop_alloc;
+    cudaEvent_t start_kernel, stop_kernel;
+    cudaEvent_t start_dealloc, stop_dealloc;
+    
+    CHECK_CUDA_ERROR(cudaEventCreate(&start_alloc)); CHECK_CUDA_ERROR(cudaEventCreate(&stop_alloc));
+    CHECK_CUDA_ERROR(cudaEventCreate(&start_kernel)); CHECK_CUDA_ERROR(cudaEventCreate(&stop_kernel));
+    CHECK_CUDA_ERROR(cudaEventCreate(&start_dealloc)); CHECK_CUDA_ERROR(cudaEventCreate(&stop_dealloc));
+
+    // ==========================================
+    // PHASE 1: Allocation and Host->Device Transfer
+    // ==========================================
+    CHECK_CUDA_ERROR(cudaEventRecord(start_alloc));
+
     CHECK_CUDA_ERROR( cudaMalloc(&d_V2, bytes) );
     CHECK_CUDA_ERROR( cudaMalloc(&d_U, bytes) );
     CHECK_CUDA_ERROR( cudaMalloc(&d_V, bytes) );
     CHECK_CUDA_ERROR( cudaMalloc(&d_W, bytes) );
 
-    // Notice we do NOT need to Memcpy V2 to the GPU, because the kernel completely overwrites it!
-    // We also don't need cudaMemset, because every cell calculates its own final value directly.
     CHECK_CUDA_ERROR( cudaMemcpy(d_U, U, bytes, cudaMemcpyHostToDevice) );
     CHECK_CUDA_ERROR( cudaMemcpy(d_V, V, bytes, cudaMemcpyHostToDevice) );
     CHECK_CUDA_ERROR( cudaMemcpy(d_W, W, bytes, cudaMemcpyHostToDevice) );
 
+    CHECK_CUDA_ERROR(cudaEventRecord(stop_alloc));
+    CHECK_CUDA_ERROR(cudaEventSynchronize(stop_alloc));
+
+    // ==========================================
+    // PHASE 2: Kernel Execution
+    // ==========================================
     dim3 threadsPerBlock(8, 8, 8);
     dim3 numBlocks((Vnx + threadsPerBlock.x - 1) / threadsPerBlock.x,
                    (Vny + threadsPerBlock.y - 1) / threadsPerBlock.y,
                    (Vnz + threadsPerBlock.z - 1) / threadsPerBlock.z);
 
-    // Cast the double spacing to the correct precision template type
+    CHECK_CUDA_ERROR(cudaEventRecord(start_kernel));
+
     cdv_fused_kernel<RealType><<<numBlocks, threadsPerBlock>>>(
         d_V2, d_U, d_V, d_W, (RealType)dxmin, (RealType)dymin, (RealType)dzmin, Vnx, Vny, Vnz, ldx, ldy
     );
+    
+    CHECK_CUDA_ERROR(cudaEventRecord(stop_kernel));
+    CHECK_CUDA_ERROR(cudaEventSynchronize(stop_kernel));
     CHECK_CUDA_ERROR( cudaGetLastError() );
-    CHECK_CUDA_ERROR( cudaDeviceSynchronize() );
 
-    // Bring the final fused array back to the CPU
+    // ==========================================
+    // PHASE 3: Device->Host Transfer and Deallocation
+    // ==========================================
+    CHECK_CUDA_ERROR(cudaEventRecord(start_dealloc));
+
     CHECK_CUDA_ERROR( cudaMemcpy(V2, d_V2, bytes, cudaMemcpyDeviceToHost) );
 
     CHECK_CUDA_ERROR( cudaFree(d_V2) ); CHECK_CUDA_ERROR( cudaFree(d_U) ); 
     CHECK_CUDA_ERROR( cudaFree(d_V) ); CHECK_CUDA_ERROR( cudaFree(d_W) );
+
+    CHECK_CUDA_ERROR(cudaEventRecord(stop_dealloc));
+    CHECK_CUDA_ERROR(cudaEventSynchronize(stop_dealloc));
+
+    // --- Calculate and Print Times (in microseconds to match Fortran) ---
+    float ms_alloc = 0, ms_kernel = 0, ms_dealloc = 0;
+    cudaEventElapsedTime(&ms_alloc, start_alloc, stop_alloc);
+    cudaEventElapsedTime(&ms_kernel, start_kernel, stop_kernel);
+    cudaEventElapsedTime(&ms_dealloc, start_dealloc, stop_dealloc);
+
+    // Multiply by 1000 to convert ms to us, printing exact Fortran format
+    printf(" Timer [CUDA_H2D] elapsed time: %10.6f us\n", ms_alloc * 1000.0f);
+    printf(" Timer [CUDA_Core] elapsed time: %10.6f us\n", ms_kernel * 1000.0f);
+    printf(" Timer [CUDA_D2H] elapsed time: %10.6f us\n", ms_dealloc * 1000.0f);
+    printf(" Timer [CUDA_Total] elapsed time: %10.6f us\n", (ms_alloc + ms_kernel + ms_dealloc) * 1000.0f);
+
+    // --- Cleanup Events ---
+    cudaEventDestroy(start_alloc); cudaEventDestroy(stop_alloc);
+    cudaEventDestroy(start_kernel); cudaEventDestroy(stop_kernel);
+    cudaEventDestroy(start_dealloc); cudaEventDestroy(stop_dealloc);
 }
 
 extern "C" {

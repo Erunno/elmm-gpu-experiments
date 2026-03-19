@@ -6,6 +6,14 @@ module MomentumAdvection
 
   implicit none
 
+
+  ! --- Internal Timer State ---
+  integer, parameter :: MAX_TIMERS = 20
+  character(len=64), save :: timer_names(MAX_TIMERS) = ""
+  integer(8), save :: timer_starts(MAX_TIMERS) = 0
+  integer(8), save :: sys_timer_rate = -1
+  integer, save :: num_timers = 0
+
 contains
 
 
@@ -303,8 +311,6 @@ contains
 
 
 subroutine CDV(V2, U, V, W)
-    ! We ONLY need to import the C-bindings locally. 
-    ! The module already provides knd, dxmin, Vnx, etc.
     use iso_c_binding, only: c_char, c_size_t, c_double, c_null_char, c_sizeof
     
     real(knd), contiguous, intent(out) :: V2(-2:,-2:,-2:)
@@ -319,11 +325,8 @@ subroutine CDV(V2, U, V, W)
         real(knd), dimension(*), intent(in) :: U, V, W, V2
         integer(c_size_t), value, intent(in) :: total_size, knd_bytes
       end subroutine dump_cdv_snapshot
-    end interface
-
+      
     ! --- Interface for CUDA Fused Kernel ---
-    ! Broken into multiple lines to satisfy Fortran's 132-character limit
-    interface
       subroutine launch_cdv_fused_cuda(V2, U, V, W, dxmin, dymin, dzmin, &
                                        Vnx, Vny, Vnz, ldx, ldy, &
                                        total_size, knd_bytes) &
@@ -336,6 +339,32 @@ subroutine CDV(V2, U, V, W)
       end subroutine launch_cdv_fused_cuda
     end interface
 
+    ! --- Interface for C++ OpenMP Kernel ---
+    interface
+      subroutine launch_cdv_fused_cpp(V2, U, V, W, dxmin, dymin, dzmin, &
+                                      Vnx, Vny, Vnz, ldx, ldy, knd_bytes) &
+                                      bind(C, name="launch_cdv_fused_cpp")
+        import :: c_size_t, c_double, knd
+        real(knd), dimension(*), intent(inout) :: V2
+        real(knd), dimension(*), intent(in)    :: U, V, W
+        real(c_double), value, intent(in)      :: dxmin, dymin, dzmin
+        integer(c_size_t), value, intent(in)   :: Vnx, Vny, Vnz, ldx, ldy, knd_bytes
+      end subroutine launch_cdv_fused_cpp
+    end interface
+
+    ! --- Interface for C++ Unfused OpenMP Kernel ---
+    interface
+      subroutine launch_cdv_unfused_cpp(V2, U, V, W, dxmin, dymin, dzmin, &
+                                        Vnx, Vny, Vnz, ldx, ldy, knd_bytes) &
+                                        bind(C, name="launch_cdv_unfused_cpp")
+        import :: c_size_t, c_double, knd
+        real(knd), dimension(*), intent(inout) :: V2
+        real(knd), dimension(*), intent(in)    :: U, V, W
+        real(c_double), value, intent(in)      :: dxmin, dymin, dzmin
+        integer(c_size_t), value, intent(in)   :: Vnx, Vny, Vnz, ldx, ldy, knd_bytes
+      end subroutine launch_cdv_unfused_cpp
+    end interface
+
     integer(c_size_t) :: total_size, ldx, ldy, knd_bytes
 
     ldx = size(U, 1) 
@@ -346,20 +375,58 @@ subroutine CDV(V2, U, V, W)
     ! === SNAPSHOT 1: Save inputs ===
     call dump_cdv_snapshot(c_char_"input.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
 
-    ! === THE NEW FUSED GPU PHYSICS ===
+
+    ! =========================================
+    ! 1. CUDA EVALUATION
+    ! =========================================
     call launch_cdv_fused_cuda(V2, U, V, W, &
                                real(dxmin, c_double), real(dymin, c_double), real(dzmin, c_double), &
                                int(Vnx, c_size_t), int(Vny, c_size_t), int(Vnz, c_size_t), &
                                ldx, ldy, total_size, knd_bytes)
+    
+    ! Dump CUDA Results
+    call dump_cdv_snapshot(c_char_"output_cuda.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
 
-    ! === Original Physics ===
-    ! call set(V2, 0)
-    ! call CDVdiv(V2, U, V, W)
-    ! call CDVadv(V2, U, V, W)
-    ! call multiply(V2, 0.5_knd)
 
-    ! === SNAPSHOT 2: Save outputs ===
-    call dump_cdv_snapshot(c_char_"output.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
+    ! =========================================
+    ! 2.a C++ OPENMP EVALUATION
+    ! =========================================
+    call start_timer("CPP_OMP")
+    call launch_cdv_fused_cpp(V2, U, V, W, &
+                              real(dxmin, c_double), real(dymin, c_double), real(dzmin, c_double), &
+                              int(Vnx, c_size_t), int(Vny, c_size_t), int(Vnz, c_size_t), &
+                              ldx, ldy, knd_bytes)
+    call stop_timer("CPP_OMP")
+    
+    ! Dump C++ Results
+    call dump_cdv_snapshot(c_char_"output_cpp.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
+
+
+    ! =========================================
+    ! 2.b C++ UNFUSED OPENMP EVALUATION
+    ! =========================================
+    call start_timer("CPP_UNFUSED")
+    call launch_cdv_unfused_cpp(V2, U, V, W, &
+                                real(dxmin, c_double), real(dymin, c_double), real(dzmin, c_double), &
+                                int(Vnx, c_size_t), int(Vny, c_size_t), int(Vnz, c_size_t), &
+                                ldx, ldy, knd_bytes)
+    call stop_timer("CPP_UNFUSED")
+    
+    ! Dump Unfused C++ Results
+    call dump_cdv_snapshot(c_char_"output_cpp_unfused.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
+
+    ! =========================================
+    ! 3. FORTRAN ORIGINAL EVALUATION
+    ! =========================================
+    call start_timer("Original")
+    call set(V2, 0)
+    call CDVdiv(V2, U, V, W)
+    call CDVadv(V2, U, V, W)
+    call multiply(V2, 0.5_knd)
+    call stop_timer("Original")
+
+    ! Dump Fortran Results
+    call dump_cdv_snapshot(c_char_"output_fortran.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
 
   end subroutine CDV
 
@@ -881,6 +948,55 @@ subroutine CDV(V2, U, V, W)
     call multiply(W2, -1._knd/divcoef)
 
   end subroutine CD4divW
+
+  ! ==========================================
+  ! Timing Subroutines
+  ! ==========================================
+
+  subroutine start_timer(name)
+      character(len=*), intent(in) :: name
+      integer :: i
+      integer(8) :: t_count, t_rate
+      
+      call system_clock(count=t_count, count_rate=t_rate)
+      if (sys_timer_rate == -1) sys_timer_rate = t_rate  ! <--- Updated here
+      
+      ! Check if timer already exists to restart it
+      do i = 1, num_timers
+          if (trim(timer_names(i)) == trim(name)) then
+              timer_starts(i) = t_count
+              return
+          end if
+      end do
+      
+      ! Register new timer
+      if (num_timers < MAX_TIMERS) then
+          num_timers = num_timers + 1
+          timer_names(num_timers) = trim(name)
+          timer_starts(num_timers) = t_count
+      else
+          print *, "Warning: Max timers reached. Cannot track ", trim(name)
+      end if
+  end subroutine start_timer
+
+
+  subroutine stop_timer(name)
+      character(len=*), intent(in) :: name
+      integer :: i
+      integer(8) :: t_stop
+      real(knd) :: elapsed_us
+      
+      call system_clock(count=t_stop)
+      
+      do i = 1, num_timers
+          if (trim(timer_names(i)) == trim(name)) then
+              elapsed_us = real(t_stop - timer_starts(i), knd) * 1000000.0_knd / real(timer_rate, knd)
+              print *, "Timer [", trim(name), "] elapsed time: ", elapsed_us, " us"
+              return
+          end if
+      end do
+      print *, "Warning: Timer [", trim(name), "] not found!"
+  end subroutine stop_timer
 
 
 end module MomentumAdvection

@@ -101,6 +101,7 @@ if str(comp)=='intel':
     lto_flag = ''
 
   env.Append(F90FLAGS='-cpp -standard-semantics -heap-arrays 200 -assume recursion')
+  
 
   env.Append(F90PATH = [target_dir,target_dir + '/P/'])
 
@@ -238,7 +239,7 @@ else:
 env.Append(F90FLAGS= fast_flag + openmp_flag + prof_flag + lto_flag + extra_flag + prec_flag + check_flag)
 env.Append(FFLAGS= env['F90FLAGS'])
 env.Append(CFLAGS= ' -O3 '+ openmp_flag + prof_flag + lto_flag + extra_flag + prec_flag + c_check_flag)
-env.Append(CXXFLAGS= ' -O3 ' + openmp_flag + prof_flag + extra_flag + prec_flag + c_check_flag)
+env.Append(CXXFLAGS= fast_flag + openmp_flag + prof_flag + lto_flag + extra_flag + prec_flag + c_check_flag)
   
 env.Append(LINKFLAGS= fast_flag + openmp_flag + prof_flag + lto_flag + extra_flag) # + '-Bdynamic -lpoisfft -lfftw3 -lfftw3f -lfftw3_omp -lfftw3f_omp -Bstatic -lgfortran -lquadmath -lstdc++ -llapack -L/usr/lib/x86_64-linux-uclibc/usr/lib/ -lc -lm -lpthread'  -Wl,--verbose
 try:
@@ -465,7 +466,7 @@ Depends(objs[-1], 'wmfluxes-nobranch-inc-4ord.f90')
 # --- ADDED CUDA RULES HERE ---
 # ==============================================================================
 env['NVCC'] = 'nvcc'
-env['NVCCFLAGS'] = '-O3 -arch=sm_70' # Modify this matching your GPU! (e.g., sm_80 for A100)
+env['NVCCFLAGS'] = '-O3 -arch=sm_90' # Note: updated sm_70 to sm_90 for your H100!
 env.Append(BUILDERS={'NVCC': Builder(action='$NVCC $NVCCFLAGS -c $SOURCE -o $TARGET', suffix='.o', src_suffix='.cu')})
 
 env.Append(LIBS=['cudart'])
@@ -476,6 +477,10 @@ objs += env.NVCC(target = target_dir + 'cdu_cuda', source = 'cdu_cuda.cu')
 objs += env.NVCC(target = target_dir + 'cdv_cuda', source = 'cdv_cuda.cu')
 # objs += env.NVCC(target = target_dir + 'memory_cuda', source = 'memory_cuda.cu')
 objs += env.Object(target = target_dir + 'snapshot_wrapper', source = 'snapshot_wrapper.cpp', CXXFLAGS = env['CXXFLAGS'] + ' -std=c++17')
+
+# --- C++ OPENMP KERNEL ---
+objs += env.Object(target = target_dir + 'cdv_cpp', source = 'cdv_cpp.cpp', CXXFLAGS = env['CXXFLAGS'] + ' -std=c++17')
+objs += env.Object(target = target_dir + 'cdv_cpp_unfused', source = 'cdv_cpp_unfused.cpp', CXXFLAGS = env['CXXFLAGS'] + ' -std=c++17')
 # ==============================================================================
 
 
