@@ -303,46 +303,65 @@ contains
 
 
 subroutine CDV(V2, U, V, W)
-    ! Added c_size_t and c_sizeof
-    use iso_c_binding, only: c_char, c_size_t, c_null_char, c_sizeof
-    use Parameters, only: knd
+    ! We ONLY need to import the C-bindings locally. 
+    ! The module already provides knd, dxmin, Vnx, etc.
+    use iso_c_binding, only: c_char, c_size_t, c_double, c_null_char, c_sizeof
+    
     real(knd), contiguous, intent(out) :: V2(-2:,-2:,-2:)
     real(knd), contiguous, intent(in)  :: U(-2:,-2:,-2:), V(-2:,-2:,-2:), W(-2:,-2:,-2:)
 
     ! --- Interface for C++ Snapshot ---
     interface
-      subroutine dump_cdv_snapshot(suffix, U, V, W, V2, total_size, knd_bytes) bind(C, name="dump_cdv_snapshot")
+      subroutine dump_cdv_snapshot(suffix, U, V, W, V2, total_size, knd_bytes) &
+                                   bind(C, name="dump_cdv_snapshot")
         import :: c_char, c_size_t, knd
         character(kind=c_char), dimension(*), intent(in) :: suffix
         real(knd), dimension(*), intent(in) :: U, V, W, V2
-        integer(c_size_t), value, intent(in) :: total_size
-        integer(c_size_t), value, intent(in) :: knd_bytes
+        integer(c_size_t), value, intent(in) :: total_size, knd_bytes
       end subroutine dump_cdv_snapshot
     end interface
 
-    ! Using 64-bit sizes
-    integer(c_size_t) :: total_size
-    integer(c_size_t) :: knd_bytes
-    
+    ! --- Interface for CUDA Fused Kernel ---
+    ! Broken into multiple lines to satisfy Fortran's 132-character limit
+    interface
+      subroutine launch_cdv_fused_cuda(V2, U, V, W, dxmin, dymin, dzmin, &
+                                       Vnx, Vny, Vnz, ldx, ldy, &
+                                       total_size, knd_bytes) &
+                                       bind(C, name="launch_cdv_fused_cuda")
+        import :: c_size_t, c_double, knd
+        real(knd), dimension(*), intent(inout) :: V2
+        real(knd), dimension(*), intent(in)    :: U, V, W
+        real(c_double), value, intent(in)      :: dxmin, dymin, dzmin
+        integer(c_size_t), value, intent(in)   :: Vnx, Vny, Vnz, ldx, ldy, total_size, knd_bytes
+      end subroutine launch_cdv_fused_cuda
+    end interface
+
+    integer(c_size_t) :: total_size, ldx, ldy, knd_bytes
+
+    ldx = size(U, 1) 
+    ldy = size(U, 2)
     total_size = int(size(U), c_size_t)
-    ! Safely extract the exact byte size of a single array element
     knd_bytes = c_sizeof(U(1,1,1))
 
-    ! === SNAPSHOT 1 ===
+    ! === SNAPSHOT 1: Save inputs ===
     call dump_cdv_snapshot(c_char_"input.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
 
-    ! === Original Physics ===
-    call set(V2, 0)
-    call CDVdiv(V2, U, V, W)
-    call CDVadv(V2, U, V, W)
-    call multiply(V2, 0.5_knd)
+    ! === THE NEW FUSED GPU PHYSICS ===
+    call launch_cdv_fused_cuda(V2, U, V, W, &
+                               real(dxmin, c_double), real(dymin, c_double), real(dzmin, c_double), &
+                               int(Vnx, c_size_t), int(Vny, c_size_t), int(Vnz, c_size_t), &
+                               ldx, ldy, total_size, knd_bytes)
 
-    ! === SNAPSHOT 2 ===
+    ! === Original Physics ===
+    ! call set(V2, 0)
+    ! call CDVdiv(V2, U, V, W)
+    ! call CDVadv(V2, U, V, W)
+    ! call multiply(V2, 0.5_knd)
+
+    ! === SNAPSHOT 2: Save outputs ===
     call dump_cdv_snapshot(c_char_"output.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
 
   end subroutine CDV
-
-
 
 
 

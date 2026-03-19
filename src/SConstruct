@@ -473,6 +473,8 @@ env.Append(LIBPATH=['/usr/local/cuda/lib64']) # This path must exist in your doc
 
 # Compile the .cu file we created
 objs += env.NVCC(target = target_dir + 'cdu_cuda', source = 'cdu_cuda.cu')
+objs += env.NVCC(target = target_dir + 'cdv_cuda', source = 'cdv_cuda.cu')
+# objs += env.NVCC(target = target_dir + 'memory_cuda', source = 'memory_cuda.cu')
 objs += env.Object(target = target_dir + 'snapshot_wrapper', source = 'snapshot_wrapper.cpp', CXXFLAGS = env['CXXFLAGS'] + ' -std=c++17')
 # ==============================================================================
 
