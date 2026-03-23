@@ -466,7 +466,7 @@ Depends(objs[-1], 'wmfluxes-nobranch-inc-4ord.f90')
 # --- ADDED CUDA RULES HERE ---
 # ==============================================================================
 env['NVCC'] = 'nvcc'
-env['NVCCFLAGS'] = '-O3 -arch=sm_90' # Note: updated sm_70 to sm_90 for your H100!
+env['NVCCFLAGS'] = '-O3 -arch=native' # Note: updated sm_70 to sm_90 for your H100!
 env.Append(BUILDERS={'NVCC': Builder(action='$NVCC $NVCCFLAGS -c $SOURCE -o $TARGET', suffix='.o', src_suffix='.cu')})
 
 env.Append(LIBS=['cudart'])
