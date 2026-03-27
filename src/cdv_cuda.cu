@@ -140,10 +140,10 @@ void launch_fused_tmpl(RealType* V2, RealType* U, RealType* V, RealType* W,
     cudaEventElapsedTime(&ms_dealloc, start_dealloc, stop_dealloc);
 
     // Multiply by 1000 to convert ms to us, printing exact Fortran format
-    printf(" Timer [CUDA_H2D] elapsed time: %10.6f us\n", ms_alloc * 1000.0f);
-    printf(" Timer [CUDA_Core] elapsed time: %10.6f us\n", ms_kernel * 1000.0f);
-    printf(" Timer [CUDA_D2H] elapsed time: %10.6f us\n", ms_dealloc * 1000.0f);
-    printf(" Timer [CUDA_Total] elapsed time: %10.6f us\n", (ms_alloc + ms_kernel + ms_dealloc) * 1000.0f);
+    printf(" Timer [(CDV) CUDA H2D] elapsed time: %10.6f us\n", ms_alloc * 1000.0f);
+    printf(" Timer [(CDV) CUDA Core] elapsed time: %10.6f us\n", ms_kernel * 1000.0f);
+    printf(" Timer [(CDV) CUDA D2H] elapsed time: %10.6f us\n", ms_dealloc * 1000.0f);
+    printf(" Timer [(CDV) CUDA Total] elapsed time: %10.6f us\n", (ms_alloc + ms_kernel + ms_dealloc) * 1000.0f);
 
     // --- Cleanup Events ---
     cudaEventDestroy(start_alloc); cudaEventDestroy(stop_alloc);
