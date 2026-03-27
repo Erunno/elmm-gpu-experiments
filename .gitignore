@@ -1,4 +1,4 @@
-*.cu*
+*.cu[~]
 *~
 *.mod
 *.smod
@@ -18,4 +18,4 @@ custom
 examples/*/output
 custom/*/output
 *.vscode
-
+**/bin_snapshots

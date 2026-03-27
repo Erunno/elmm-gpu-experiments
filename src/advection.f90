@@ -6,6 +6,14 @@ module MomentumAdvection
 
   implicit none
 
+
+  ! --- Internal Timer State ---
+  integer, parameter :: MAX_TIMERS = 20
+  character(len=64), save :: timer_names(MAX_TIMERS) = ""
+  integer(8), save :: timer_starts(MAX_TIMERS) = 0
+  integer(8), save :: sys_timer_rate = -1
+  integer, save :: num_timers = 0
+
 contains
 
 
@@ -302,17 +310,263 @@ contains
 
 
 
-  subroutine CDV(V2, U, V, W)
+subroutine CDV(V2, U, V, W)
+    use iso_c_binding, only: c_char, c_size_t, c_double, c_null_char, c_sizeof
+    
     real(knd), contiguous, intent(out) :: V2(-2:,-2:,-2:)
     real(knd), contiguous, intent(in)  :: U(-2:,-2:,-2:), V(-2:,-2:,-2:), W(-2:,-2:,-2:)
 
+    ! --- Interface for C++ Snapshot ---
+    interface
+      subroutine dump_cdv_snapshot(suffix, U, V, W, V2, total_size, knd_bytes) &
+                                   bind(C, name="dump_cdv_snapshot")
+        import :: c_char, c_size_t, knd
+        character(kind=c_char), dimension(*), intent(in) :: suffix
+        real(knd), dimension(*), intent(in) :: U, V, W, V2
+        integer(c_size_t), value, intent(in) :: total_size, knd_bytes
+      end subroutine dump_cdv_snapshot
+      
+    ! --- Interface for CUDA Fused Kernel ---
+      subroutine launch_cdv_fused_cuda(V2, U, V, W, dxmin, dymin, dzmin, &
+                                       Vnx, Vny, Vnz, ldx, ldy, &
+                                       total_size, knd_bytes) &
+                                       bind(C, name="launch_cdv_fused_cuda")
+        import :: c_size_t, c_double, knd
+        real(knd), dimension(*), intent(inout) :: V2
+        real(knd), dimension(*), intent(in)    :: U, V, W
+        real(c_double), value, intent(in)      :: dxmin, dymin, dzmin
+        integer(c_size_t), value, intent(in)   :: Vnx, Vny, Vnz, ldx, ldy, total_size, knd_bytes
+      end subroutine launch_cdv_fused_cuda
+    end interface
+
+    ! --- Interface for C++ OpenMP Kernel ---
+    interface
+      subroutine launch_cdv_fused_cpp(V2, U, V, W, dxmin, dymin, dzmin, &
+                                      Vnx, Vny, Vnz, ldx, ldy, knd_bytes) &
+                                      bind(C, name="launch_cdv_fused_cpp")
+        import :: c_size_t, c_double, knd
+        real(knd), dimension(*), intent(inout) :: V2
+        real(knd), dimension(*), intent(in)    :: U, V, W
+        real(c_double), value, intent(in)      :: dxmin, dymin, dzmin
+        integer(c_size_t), value, intent(in)   :: Vnx, Vny, Vnz, ldx, ldy, knd_bytes
+      end subroutine launch_cdv_fused_cpp
+    end interface
+
+    ! --- Interface for C++ Unfused OpenMP Kernel ---
+    interface
+      subroutine launch_cdv_unfused_cpp(V2, U, V, W, dxmin, dymin, dzmin, &
+                                        Vnx, Vny, Vnz, ldx, ldy, knd_bytes) &
+                                        bind(C, name="launch_cdv_unfused_cpp")
+        import :: c_size_t, c_double, knd
+        real(knd), dimension(*), intent(inout) :: V2
+        real(knd), dimension(*), intent(in)    :: U, V, W
+        real(c_double), value, intent(in)      :: dxmin, dymin, dzmin
+        integer(c_size_t), value, intent(in)   :: Vnx, Vny, Vnz, ldx, ldy, knd_bytes
+      end subroutine launch_cdv_unfused_cpp
+    end interface
+
+    integer(c_size_t) :: total_size, ldx, ldy, knd_bytes
+
+    ldx = size(U, 1) 
+    ldy = size(U, 2)
+    total_size = int(size(U), c_size_t)
+    knd_bytes = c_sizeof(U(1,1,1))
+
+    ! === SNAPSHOT 1: Save inputs ===
+    call dump_cdv_snapshot(c_char_"input.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
+
+
+    ! =========================================
+    ! 1. CUDA EVALUATION
+    ! =========================================
+    call launch_cdv_fused_cuda(V2, U, V, W, &
+                               real(dxmin, c_double), real(dymin, c_double), real(dzmin, c_double), &
+                               int(Vnx, c_size_t), int(Vny, c_size_t), int(Vnz, c_size_t), &
+                               ldx, ldy, total_size, knd_bytes)
+    
+    ! Dump CUDA Results
+    call dump_cdv_snapshot(c_char_"output_cuda.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
+
+
+    ! =========================================
+    ! 2.a C++ OPENMP EVALUATION
+    ! =========================================
+    call launch_cdv_fused_cpp(V2, U, V, W, &
+                              real(dxmin, c_double), real(dymin, c_double), real(dzmin, c_double), &
+                              int(Vnx, c_size_t), int(Vny, c_size_t), int(Vnz, c_size_t), &
+                              ldx, ldy, knd_bytes)
+    call start_timer("(CDV) CPP Fused OpenMP")
+    call launch_cdv_fused_cpp(V2, U, V, W, &
+                              real(dxmin, c_double), real(dymin, c_double), real(dzmin, c_double), &
+                              int(Vnx, c_size_t), int(Vny, c_size_t), int(Vnz, c_size_t), &
+                              ldx, ldy, knd_bytes)
+    call stop_timer("(CDV) CPP Fused OpenMP")
+    
+    ! Dump C++ Results
+    call dump_cdv_snapshot(c_char_"output_cpp.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
+
+
+    ! =========================================
+    ! 2.b C++ UNFUSED OPENMP EVALUATION
+    ! =========================================
+    call launch_cdv_unfused_cpp(V2, U, V, W, &
+                                real(dxmin, c_double), real(dymin, c_double), real(dzmin, c_double), &
+                                int(Vnx, c_size_t), int(Vny, c_size_t), int(Vnz, c_size_t), &
+                                ldx, ldy, knd_bytes)
+
+    call start_timer("(CDV) CPP Unfused")
+    call launch_cdv_unfused_cpp(V2, U, V, W, &
+                                real(dxmin, c_double), real(dymin, c_double), real(dzmin, c_double), &
+                                int(Vnx, c_size_t), int(Vny, c_size_t), int(Vnz, c_size_t), &
+                                ldx, ldy, knd_bytes)
+    call stop_timer("(CDV) CPP Unfused")
+    
+    ! Dump Unfused C++ Results
+    call dump_cdv_snapshot(c_char_"output_cpp_unfused.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
+
+    ! =========================================
+    ! 3. FORTRAN ORIGINAL EVALUATION
+    ! =========================================
     call set(V2, 0)
     call CDVdiv(V2, U, V, W)
     call CDVadv(V2, U, V, W)
     call multiply(V2, 0.5_knd)
+
+    call start_timer("(CDV) Fortran Unfused (original)")
+    call set(V2, 0)
+    call CDVdiv(V2, U, V, W)
+    call CDVadv(V2, U, V, W)
+    call multiply(V2, 0.5_knd)
+    call stop_timer("(CDV) Fortran Unfused (original)")
+
+    ! Dump Fortran Results
+    call dump_cdv_snapshot(c_char_"output_fortran.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
+
+    ! =========================================
+    ! 4. FORTRAN FUSED EVALUATION
+    ! =========================================
+    call CDV_fused(V2, U, V, W) ! Warm-up
+
+    call start_timer("(CDV) Fortran Fused")
+    call CDV_fused(V2, U, V, W)
+    call stop_timer("(CDV) Fortran Fused")
+
+    ! Dump Fused Fortran Results
+    call dump_cdv_snapshot(c_char_"output_fortran_fused.dump" // c_null_char, U, V, W, V2, total_size, knd_bytes)
+
   end subroutine CDV
 
+  subroutine CDV_fused(V2, U, V, W)
+    real(knd), contiguous, intent(out) :: V2(-2:,-2:,-2:)
+    real(knd), contiguous, intent(in)  :: U(-2:,-2:,-2:), V(-2:,-2:,-2:), W(-2:,-2:,-2:)
+    real(knd) :: Ax_div, Ay_div, Az_div
+    real(knd) :: Ax_adv, Ay_adv, Az_adv
+    real(knd) :: div_val, Uadv, Wadv, adv_val
+    integer :: i, j, k, bi, bj, bk
+    integer :: tnx, tny, tnz
+    
+    integer, parameter :: narr = 4
+    
+    tnx = tilenx(narr)
+    tny = tileny(narr)
+    tnz = tilenz(narr)
 
+    ! Precompute constants
+    Ax_div = 0.25_knd / dxmin
+    Ay_div = 0.25_knd / dymin
+    Az_div = 0.25_knd / dzmin
+
+    Ax_adv = 0.125_knd / dxmin
+    Ay_adv = 0.5_knd / dymin
+    Az_adv = 0.125_knd / dzmin
+
+    !$omp parallel do private(i, j, k, bi, bj, bk, div_val, Uadv, Wadv, adv_val) schedule(runtime) collapse(3)
+    do bk = 1, Vnz, tnz
+      do bj = 1, Vny, tny
+        do bi = 1, Vnx, tnx
+          do k = bk, min(bk+tnz-1, Vnz)
+            do j = bj, min(bj+tny-1, Vny)
+              ! Tell the compiler to vectorize this inner loop aggressively
+              !dir$ ivdep
+              do i = bi, min(bi+tnx-1, Vnx)
+                
+                ! --- PART 1: CDVdiv ---
+                div_val = - ((Ay_div*(V(i,j+1,k) + V(i,j,k)) * (V(i,j+1,k) + V(i,j,k)) &
+                             -Ay_div*(V(i,j,k) + V(i,j-1,k)) * (V(i,j,k) + V(i,j-1,k))) &
+                            +(Ax_div*(V(i+1,j,k) + V(i,j,k)) * (U(i,j+1,k) + U(i,j,k)) &
+                             -Ax_div*(V(i,j,k) + V(i-1,j,k)) * (U(i-1,j+1,k) + U(i-1,j,k))) &
+                            +(Az_div*(V(i,j,k+1) + V(i,j,k)) * (W(i,j+1,k) + W(i,j,k)) &
+                             -Az_div*(V(i,j,k) + V(i,j,k-1)) * (W(i,j+1,k-1) + W(i,j,k-1))))
+
+                ! --- PART 2: CDVadv ---
+                Uadv = ( U(i,j,k) + U(i,j+1,k) + U(i-1,j,k) + U(i-1,j+1,k) )
+                Wadv = ( W(i,j,k) + W(i,j+1,k) + W(i,j,k-1) + W(i,j+1,k-1) )
+                
+                adv_val = div_val - (Ax_adv*(V(i+1,j,k)-V(i-1,j,k)) * Uadv &
+                                   + Ay_adv*(V(i,j+1,k)-V(i,j-1,k)) * V(i,j,k) &
+                                   + Az_adv*(V(i,j,k+1)-V(i,j,k-1)) * Wadv )
+
+                ! --- PART 3: Combine and Write ONCE ---
+                V2(i,j,k) = adv_val * 0.5_knd
+
+              end do
+            end do
+          end do
+        end do
+      end do
+    end do
+    !$omp end parallel do
+  end subroutine CDV_fused
+
+  subroutine CDV_fused_tiled(V2, U, V, W)
+    real(knd), contiguous, intent(out) :: V2(-2:,-2:,-2:)
+    real(knd), contiguous, intent(in)  :: U(-2:,-2:,-2:), V(-2:,-2:,-2:), W(-2:,-2:,-2:)
+    real(knd) :: Ax_div, Ay_div, Az_div
+    real(knd) :: Ax_adv, Ay_adv, Az_adv
+    real(knd) :: div_val, Uadv, Wadv, adv_val
+    integer :: i, j, k
+    
+    ! Precompute constants
+    Ax_div = 0.25_knd / dxmin
+    Ay_div = 0.25_knd / dymin
+    Az_div = 0.25_knd / dzmin
+
+    Ax_adv = 0.125_knd / dxmin
+    Ay_adv = 0.5_knd / dymin
+    Az_adv = 0.125_knd / dzmin
+
+    ! Only parallelize the outermost loop, just like C++ schedule(static)
+    !$omp parallel do private(i, j, k, div_val, Uadv, Wadv, adv_val) schedule(static)
+    do k = 1, Vnz
+      do j = 1, Vny
+        ! Force aggressive vectorization on the long, linear inner loop
+        !dir$ ivdep
+        do i = 1, Vnx
+          
+          ! --- PART 1: CDVdiv ---
+          div_val = - ((Ay_div*(V(i,j+1,k) + V(i,j,k)) * (V(i,j+1,k) + V(i,j,k)) &
+                       -Ay_div*(V(i,j,k) + V(i,j-1,k)) * (V(i,j,k) + V(i,j-1,k))) &
+                      +(Ax_div*(V(i+1,j,k) + V(i,j,k)) * (U(i,j+1,k) + U(i,j,k)) &
+                       -Ax_div*(V(i,j,k) + V(i-1,j,k)) * (U(i-1,j+1,k) + U(i-1,j,k))) &
+                      +(Az_div*(V(i,j,k+1) + V(i,j,k)) * (W(i,j+1,k) + W(i,j,k)) &
+                       -Az_div*(V(i,j,k) + V(i,j,k-1)) * (W(i,j+1,k-1) + W(i,j,k-1))))
+
+          ! --- PART 2: CDVadv ---
+          Uadv = ( U(i,j,k) + U(i,j+1,k) + U(i-1,j,k) + U(i-1,j+1,k) )
+          Wadv = ( W(i,j,k) + W(i,j+1,k) + W(i,j,k-1) + W(i,j+1,k-1) )
+          
+          adv_val = div_val - (Ax_adv*(V(i+1,j,k)-V(i-1,j,k)) * Uadv &
+                             + Ay_adv*(V(i,j+1,k)-V(i,j-1,k)) * V(i,j,k) &
+                             + Az_adv*(V(i,j,k+1)-V(i,j,k-1)) * Wadv )
+
+          ! --- PART 3: Combine and Write ONCE ---
+          V2(i,j,k) = adv_val * 0.5_knd
+
+        end do
+      end do
+    end do
+    !$omp end parallel do
+  end subroutine CDV_fused_tiled
 
 
 
@@ -320,10 +574,14 @@ contains
     real(knd), contiguous, intent(out) :: W2(-2:,-2:,-2:)
     real(knd), contiguous, intent(in)  :: U(-2:,-2:,-2:), V(-2:,-2:,-2:), W(-2:,-2:,-2:)
 
-    call set(W2, 0)
-    call CDWdiv(W2, U, V, W)
-    call CDWadv(W2, U, V, W)
-    call multiply(W2, 0.5_knd)
+        call start_timer("(CDW) Fortran Unfused (original)")
+        
+        call set(W2, 0)
+        call CDWdiv(W2, U, V, W)
+        call CDWadv(W2, U, V, W)
+        call multiply(W2, 0.5_knd)
+        
+        call stop_timer("(CDW) Fortran Unfused (original)")
   end subroutine CDW
 
 
@@ -832,6 +1090,55 @@ contains
     call multiply(W2, -1._knd/divcoef)
 
   end subroutine CD4divW
+
+  ! ==========================================
+  ! Timing Subroutines
+  ! ==========================================
+
+  subroutine start_timer(name)
+      character(len=*), intent(in) :: name
+      integer :: i
+      integer(8) :: t_count, t_rate
+      
+      call system_clock(count=t_count, count_rate=t_rate)
+      if (sys_timer_rate == -1) sys_timer_rate = t_rate  ! <--- Updated here
+      
+      ! Check if timer already exists to restart it
+      do i = 1, num_timers
+          if (trim(timer_names(i)) == trim(name)) then
+              timer_starts(i) = t_count
+              return
+          end if
+      end do
+      
+      ! Register new timer
+      if (num_timers < MAX_TIMERS) then
+          num_timers = num_timers + 1
+          timer_names(num_timers) = trim(name)
+          timer_starts(num_timers) = t_count
+      else
+          print *, "Warning: Max timers reached. Cannot track ", trim(name)
+      end if
+  end subroutine start_timer
+
+
+  subroutine stop_timer(name)
+      character(len=*), intent(in) :: name
+      integer :: i
+      integer(8) :: t_stop
+      real(knd) :: elapsed_us
+      
+      call system_clock(count=t_stop)
+      
+      do i = 1, num_timers
+          if (trim(timer_names(i)) == trim(name)) then
+              elapsed_us = real(t_stop - timer_starts(i), knd) * 1000000.0_knd / real(timer_rate, knd)
+              print *, "Timer [", trim(name), "] elapsed time: ", elapsed_us, " us"
+              return
+          end if
+      end do
+      print *, "Warning: Timer [", trim(name), "] not found!"
+  end subroutine stop_timer
 
 
 end module MomentumAdvection
